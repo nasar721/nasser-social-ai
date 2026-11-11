@@ -13,7 +13,6 @@ permissions:
 
 jobs:
   import-and-build:
-    if: ${{ hashFiles('Nasser-Social-AI-starter.zip') != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -25,6 +24,7 @@ jobs:
       - name: Extract source files
         run: |
           set -euo pipefail
+          test -f Nasser-Social-AI-starter.zip
           mkdir -p /tmp/nasser-import
           unzip -q Nasser-Social-AI-starter.zip -d /tmp/nasser-import
           test -d /tmp/nasser-import/nasser-social-ai
