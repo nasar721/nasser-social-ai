@@ -1,0 +1,61 @@
+name: Import starter source and verify build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Nasser-Social-AI-starter.zip"
+      - ".github/workflows/import-starter.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-and-build:
+    if: ${{ hashFiles('Nasser-Social-AI-starter.zip') != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract source files
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/nasser-import
+          unzip -q Nasser-Social-AI-starter.zip -d /tmp/nasser-import
+          test -d /tmp/nasser-import/nasser-social-ai
+          rsync -a --exclude='.git' --exclude='tsconfig.app.tsbuildinfo' /tmp/nasser-import/nasser-social-ai/ ./
+          rm -f Nasser-Social-AI-starter.zip
+          test -f package.json
+          test -f src/App.tsx
+
+      - name: Commit imported source
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "feat: import NASSER SOCIAL AI starter source"
+            git push origin HEAD:main
+          fi
+
+      - name: Install dependencies and verify production build
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+
+      - name: Commit lockfile when generated
+        if: success()
+        run: |
+          if [ -f package-lock.json ]; then
+            git add package-lock.json
+            if ! git diff --cached --quiet; then
+              git commit -m "build: add npm lockfile"
+              git push origin HEAD:main
+            fi
+          fi
