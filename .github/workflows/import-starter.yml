@@ -11,6 +11,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: import-starter-main
+  cancel-in-progress: false
+
 jobs:
   import-and-build:
     runs-on: ubuntu-latest
@@ -21,19 +25,104 @@ jobs:
           ref: main
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract source files
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Extract and locate project
+        id: project
+        shell: bash
         run: |
           set -euo pipefail
-          test -f Nasser-Social-AI-starter.zip
-          mkdir -p /tmp/nasser-import
-          unzip -q Nasser-Social-AI-starter.zip -d /tmp/nasser-import
-          test -d /tmp/nasser-import/nasser-social-ai
-          rsync -a --exclude='.git' --exclude='tsconfig.app.tsbuildinfo' /tmp/nasser-import/nasser-social-ai/ ./
-          rm -f Nasser-Social-AI-starter.zip
-          test -f package.json
-          test -f src/App.tsx
+
+          archive="$GITHUB_WORKSPACE/Nasser-Social-AI-starter.zip"
+          staging="$RUNNER_TEMP/nasser-import"
+          if [[ ! -f "$archive" ]]; then
+            echo "::error::Nasser-Social-AI-starter.zip is missing from the repository root."
+            exit 1
+          fi
+
+          rm -rf "$staging"
+          mkdir -p "$staging"
+          unzip -q "$archive" -d "$staging"
+
+          # Locate the shallowest package.json so the archive may contain an
+          # enclosing folder without relying on that folder's name.
+          project_dir="$(python3 - "$staging" <<'PY'
+          import os
+          import sys
+
+          root = sys.argv[1]
+          candidates = []
+          for current, dirs, files in os.walk(root):
+              dirs[:] = [d for d in dirs if d not in {"node_modules", ".git", "dist", "build"}]
+              if "package.json" in files:
+                  rel = os.path.relpath(current, root)
+                  depth = 0 if rel == "." else rel.count(os.sep) + 1
+                  candidates.append((depth, current))
+
+          if not candidates:
+              print("No package.json found in the ZIP archive.", file=sys.stderr)
+              sys.exit(1)
+
+          shallowest = min(depth for depth, _ in candidates)
+          matches = [path for depth, path in candidates if depth == shallowest]
+          if len(matches) != 1:
+              print("Multiple equally shallow package.json files found; cannot determine the app root:", file=sys.stderr)
+              for path in matches:
+                  print(path, file=sys.stderr)
+              sys.exit(1)
+
+          print(matches[0])
+          PY
+          )"
+
+          if [[ ! -f "$project_dir/package.json" ]]; then
+            echo "::error::Could not identify the project root in the ZIP archive."
+            exit 1
+          fi
+
+          node -e 'const p=require(process.argv[1]); if (!p.scripts || !p.scripts.build) { console.error("package.json must define a build script"); process.exit(1) }' "$project_dir/package.json"
+          echo "dir=$project_dir" >> "$GITHUB_OUTPUT"
+          echo "Found project root: $project_dir"
+
+      - name: Install dependencies and verify production build
+        shell: bash
+        run: |
+          set -euo pipefail
+          project_dir="${{ steps.project.outputs.dir }}"
+          cd "$project_dir"
+
+          if [[ -f package-lock.json ]]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+          npm run build
+
+      - name: Import built source into repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          project_dir="${{ steps.project.outputs.dir }}"
+
+          # Keep this workflow and Git metadata intact; do not commit generated
+          # dependencies, build output, or local environment files.
+          rsync -a \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='node_modules/' \
+            --exclude='dist/' \
+            --exclude='build/' \
+            --exclude='.env' \
+            --exclude='.env.local' \
+            --exclude='.env.*.local' \
+            "$project_dir/" "$GITHUB_WORKSPACE/"
+          rm -f "$GITHUB_WORKSPACE/Nasser-Social-AI-starter.zip"
 
       - name: Commit imported source
+        shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -42,20 +131,6 @@ jobs:
           if ! git diff --cached --quiet; then
             git commit -m "feat: import NASSER SOCIAL AI starter source"
             git push origin HEAD:main
-          fi
-
-      - name: Install dependencies and verify production build
-        run: |
-          npm install --no-audit --no-fund
-          npm run build
-
-      - name: Commit lockfile when generated
-        if: success()
-        run: |
-          if [ -f package-lock.json ]; then
-            git add package-lock.json
-            if ! git diff --cached --quiet; then
-              git commit -m "build: add npm lockfile"
-              git push origin HEAD:main
-            fi
+          else
+            echo "No source changes to commit."
           fi
